@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NexChat – Real-Time Chat</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- Socket.IO client (served automatically by server at /socket.io/socket.io.js) -->
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+  <!-- ══════════════ LOGIN SCREEN ══════════════ -->
+  <div id="login-screen">
+    <div class="login-card">
+      <div class="logo">NexChat</div>
+      <div class="tagline">Real-Time · WebSocket · Socket.IO</div>
+
+      <input
+        type="text"
+        id="username-input"
+        placeholder="Enter your username…"
+        maxlength="20"
+        autocomplete="off"
+      />
+
+      <button class="btn-join" id="join-btn">Enter Chat →</button>
+      <div class="err" id="login-err"></div>
+    </div>
+  </div>
+
+  <!-- ══════════════ CHAT SCREEN ══════════════ -->
+  <div id="chat-screen">
+
+    <!-- Header -->
+    <header class="chat-header">
+      <div class="brand">NexChat</div>
+
+      <div class="user-info">
+        <div class="avatar" id="header-avatar">U</div>
+        <span class="username-label" id="header-username">User</span>
+      </div>
+
+      <div class="online-badge">
+        <span class="dot"></span>
+        <span id="online-count">0</span>&nbsp;online
+      </div>
+    </header>
+
+    <!-- Body -->
+    <div class="chat-body">
+
+      <!-- Sidebar: online users -->
+      <aside class="sidebar">
+        <div class="sidebar-title">Online Users</div>
+        <ul id="users-list"></ul>
+      </aside>
+
+      <!-- Main: messages + input -->
+      <div style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
+        <div id="messages-area"></div>
+        <div id="typing-indicator"></div>
+        <div class="input-bar">
+          <input
+            type="text"
+            id="msg-input"
+            placeholder="Type a message…"
+            maxlength="300"
+            autocomplete="off"
+          />
+          <button id="send-btn">Send ↑</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════ CLIENT SCRIPT ══════════════ -->
+  <script>
+    // ── DOM refs ─────────────────────────────────────────────────
+    const loginScreen    = document.getElementById('login-screen');
+    const chatScreen     = document.getElementById('chat-screen');
+    const usernameInput  = document.getElementById('username-input');
+    const joinBtn        = document.getElementById('join-btn');
+    const loginErr       = document.getElementById('login-err');
+    const headerAvatar   = document.getElementById('header-avatar');
+    const headerUsername = document.getElementById('header-username');
+    const onlineCount    = document.getElementById('online-count');
+    const usersList      = document.getElementById('users-list');
+    const messagesArea   = document.getElementById('messages-area');
+    const typingIndicator= document.getElementById('typing-indicator');
+    const msgInput       = document.getElementById('msg-input');
+    const sendBtn        = document.getElementById('send-btn');
+
+    // ── State ─────────────────────────────────────────────────────
+    let myUsername = '';
+    let socket     = null;
+    let typingTimer = null;
+    let isTyping    = false;
+    const typingUsers = {};           // username -> true
+
+    // ── Helpers ───────────────────────────────────────────────────
+    function initials(name) {
+      return name.slice(0, 2).toUpperCase();
+    }
+
+    function formatTime(iso) {
+      const d = new Date(iso);
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function scrollBottom() {
+      messagesArea.scrollTop = messagesArea.scrollHeight;
+    }
+
+    // ── Render helpers ────────────────────────────────────────────
+    function appendMessage({ username, text, timestamp }) {
+      const isSelf = username === myUsername;
+      const wrap = document.createElement('div');
+      wrap.className = `msg${isSelf ? ' self' : ''}`;
+      wrap.innerHTML = `
+        <div class="avatar sm">${initials(username)}</div>
+        <div class="msg-bubble">
+          <div class="msg-meta">
+            <span class="msg-user">${escHtml(username)}</span>
+            <span class="msg-time">${formatTime(timestamp)}</span>
+          </div>
+          <div class="msg-text">${escHtml(text)}</div>
+        </div>`;
+      messagesArea.appendChild(wrap);
+      scrollBottom();
+    }
+
+    function appendSystem(text) {
+      const el = document.createElement('div');
+      el.className = 'sys-msg';
+      el.textContent = `⚡ ${text}`;
+      messagesArea.appendChild(el);
+      scrollBottom();
+    }
+
+    function escHtml(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function updateUsersList(users) {
+      onlineCount.textContent = users.length;
+      usersList.innerHTML = users.map(u => `
+        <li>
+          <div class="avatar sm">${initials(u)}</div>
+          ${escHtml(u)}
+        </li>`).join('');
+    }
+
+    function updateTypingIndicator() {
+      const names = Object.keys(typingUsers);
+      if (names.length === 0) {
+        typingIndicator.textContent = '';
+      } else if (names.length === 1) {
+        typingIndicator.textContent = `${names[0]} is typing…`;
+      } else {
+        typingIndicator.textContent = `${names.join(', ')} are typing…`;
+      }
+    }
+
+    // ── Join chat ─────────────────────────────────────────────────
+    function joinChat() {
+      const name = usernameInput.value.trim();
+      if (!name) { loginErr.textContent = 'Please enter a username.'; return; }
+      if (name.length < 2) { loginErr.textContent = 'At least 2 characters.'; return; }
+
+      myUsername = name;
+      headerAvatar.textContent   = initials(name);
+      headerUsername.textContent = name;
+
+      // Connect socket
+      socket = io();
+
+      // ── Socket events ──────────────────────────────────────────
+      socket.on('connect', () => {
+        socket.emit('user_join', myUsername);
+        loginScreen.style.display = 'none';
+        chatScreen.style.display  = 'flex';
+        msgInput.focus();
+      });
+
+      socket.on('receive_message', (data) => {
+        appendMessage(data);
+        // Clear typing for that user when message arrives
+        delete typingUsers[data.username];
+        updateTypingIndicator();
+      });
+
+      socket.on('system_message', (data) => {
+        appendSystem(data.text);
+      });
+
+      socket.on('online_users', (users) => {
+        updateUsersList(users);
+      });
+
+      socket.on('user_typing', ({ username, isTyping: typing }) => {
+        if (typing) {
+          typingUsers[username] = true;
+        } else {
+          delete typingUsers[username];
+        }
+        updateTypingIndicator();
+      });
+
+      socket.on('disconnect', () => {
+        appendSystem('Disconnected from server. Reconnecting…');
+      });
+
+      socket.on('reconnect', () => {
+        appendSystem('Reconnected! Rejoining…');
+        socket.emit('user_join', myUsername);
+      });
+    }
+
+    // ── Send message ──────────────────────────────────────────────
+    function sendMessage() {
+      const text = msgInput.value.trim();
+      if (!text || !socket) return;
+      socket.emit('send_message', { text });
+      msgInput.value = '';
+
+      // Stop typing indicator
+      clearTimeout(typingTimer);
+      if (isTyping) {
+        socket.emit('typing', false);
+        isTyping = false;
+      }
+    }
+
+    // ── Typing detection ──────────────────────────────────────────
+    msgInput.addEventListener('input', () => {
+      if (!socket) return;
+      if (!isTyping) {
+        socket.emit('typing', true);
+        isTyping = true;
+      }
+      clearTimeout(typingTimer);
+      typingTimer = setTimeout(() => {
+        socket.emit('typing', false);
+        isTyping = false;
+      }, 1500);
+    });
+
+    // ── Event listeners ───────────────────────────────────────────
+    joinBtn.addEventListener('click', joinChat);
+    usernameInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') joinChat();
+    });
+
+    sendBtn.addEventListener('click', sendMessage);
+    msgInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+  </script>
+</body>
+</html>
